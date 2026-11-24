@@ -5,15 +5,20 @@
 package db
 
 import (
+	"encoding/json"
+
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Job struct {
 	ID             pgtype.UUID        `json:"id"`
 	Type           string             `json:"type"`
-	Payload        []byte             `json:"payload"`
+	Payload        json.RawMessage    `json:"payload"`
 	Status         string             `json:"status"`
 	IdempotencyKey pgtype.Text        `json:"idempotency_key"`
+	Attempts       int32              `json:"attempts"`
+	LastError      pgtype.Text        `json:"last_error"`
+	MaxRetries     int32              `json:"max_retries"`
 	ScheduledAt    pgtype.Timestamptz `json:"scheduled_at"`
 	StartedAt      pgtype.Timestamptz `json:"started_at"`
 	CompletedAt    pgtype.Timestamptz `json:"completed_at"`

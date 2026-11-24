@@ -7,4 +7,6 @@ import (
 
 func RegisteredRoutes(app *fiber.App, jobhandler *handlers.JobHandler) {
 	jobs := app.Group("/jobs")
+	jobs.Post("/", jobhandler.CreateJob)
+	jobs.Get("/:id", jobhandler.GetJobByID)
 }

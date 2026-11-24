@@ -1,4 +1,4 @@
-package api
+package main
 
 import (
 	"context"
@@ -30,6 +30,9 @@ func main() {
 	if err != nil {
 		log.Println("Cannot Connect to PostgreSql")
 	}
+	if err := psqlcon.Ping(context.Background()); err != nil {
+		log.Fatalf("Unable to ping Postgres: %v", err)
+	}
 	defer psqlcon.Close()
 	queries := db.New(psqlcon)
 
@@ -50,4 +53,6 @@ func main() {
 	jobhandler := handlers.NewJobHandlers(queries, redisClient)
 	routes.RegisteredRoutes(app, jobhandler)
 
+	log.Println("Producer API listening on :8080")
+	log.Fatal(app.Listen(":8080"))
 }

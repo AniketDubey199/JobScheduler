@@ -7,18 +7,20 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createJobs = `-- name: CreateJobs :one
-INSERT into jobs (type , payload , idempotency_key , scheduled_at) values ($1 , $2 , $3 , $4 ) returning id, type, payload, status, idempotency_key, scheduled_at, started_at, completed_at, created_at, updated_at
+INSERT into jobs (type , payload , idempotency_key , max_retries ,scheduled_at) values ($1 , $2 , $3 , $4 ,$5) returning id, type, payload, status, idempotency_key, attempts, last_error, max_retries, scheduled_at, started_at, completed_at, created_at, updated_at
 `
 
 type CreateJobsParams struct {
 	Type           string             `json:"type"`
-	Payload        []byte             `json:"payload"`
+	Payload        json.RawMessage    `json:"payload"`
 	IdempotencyKey pgtype.Text        `json:"idempotency_key"`
+	MaxRetries     int32              `json:"max_retries"`
 	ScheduledAt    pgtype.Timestamptz `json:"scheduled_at"`
 }
 
@@ -27,6 +29,7 @@ func (q *Queries) CreateJobs(ctx context.Context, arg CreateJobsParams) (Job, er
 		arg.Type,
 		arg.Payload,
 		arg.IdempotencyKey,
+		arg.MaxRetries,
 		arg.ScheduledAt,
 	)
 	var i Job
@@ -36,6 +39,9 @@ func (q *Queries) CreateJobs(ctx context.Context, arg CreateJobsParams) (Job, er
 		&i.Payload,
 		&i.Status,
 		&i.IdempotencyKey,
+		&i.Attempts,
+		&i.LastError,
+		&i.MaxRetries,
 		&i.ScheduledAt,
 		&i.StartedAt,
 		&i.CompletedAt,
@@ -46,7 +52,7 @@ func (q *Queries) CreateJobs(ctx context.Context, arg CreateJobsParams) (Job, er
 }
 
 const getJobsByID = `-- name: GetJobsByID :one
-SELECT id, type, payload, status, idempotency_key, scheduled_at, started_at, completed_at, created_at, updated_at from jobs where id = $1 limit 1
+SELECT id, type, payload, status, idempotency_key, attempts, last_error, max_retries, scheduled_at, started_at, completed_at, created_at, updated_at from jobs where id = $1 limit 1
 `
 
 func (q *Queries) GetJobsByID(ctx context.Context, id pgtype.UUID) (Job, error) {
@@ -58,6 +64,9 @@ func (q *Queries) GetJobsByID(ctx context.Context, id pgtype.UUID) (Job, error) 
 		&i.Payload,
 		&i.Status,
 		&i.IdempotencyKey,
+		&i.Attempts,
+		&i.LastError,
+		&i.MaxRetries,
 		&i.ScheduledAt,
 		&i.StartedAt,
 		&i.CompletedAt,
@@ -68,7 +77,7 @@ func (q *Queries) GetJobsByID(ctx context.Context, id pgtype.UUID) (Job, error) 
 }
 
 const getJobsByIdempotencyKey = `-- name: GetJobsByIdempotencyKey :one
-SELECT id, type, payload, status, idempotency_key, scheduled_at, started_at, completed_at, created_at, updated_at from jobs where idempotency_key = $1 limit 1
+SELECT id, type, payload, status, idempotency_key, attempts, last_error, max_retries, scheduled_at, started_at, completed_at, created_at, updated_at from jobs where idempotency_key = $1 limit 1
 `
 
 func (q *Queries) GetJobsByIdempotencyKey(ctx context.Context, idempotencyKey pgtype.Text) (Job, error) {
@@ -80,6 +89,9 @@ func (q *Queries) GetJobsByIdempotencyKey(ctx context.Context, idempotencyKey pg
 		&i.Payload,
 		&i.Status,
 		&i.IdempotencyKey,
+		&i.Attempts,
+		&i.LastError,
+		&i.MaxRetries,
 		&i.ScheduledAt,
 		&i.StartedAt,
 		&i.CompletedAt,
@@ -103,25 +115,28 @@ func (q *Queries) MarkJobCompleted(ctx context.Context, id pgtype.UUID) error {
 
 const markJobFailed = `-- name: MarkJobFailed :exec
 UPDATE jobs set status = $2,
+    last_error = $3,
     updated_at = NOW()
 where id = $1
 `
 
 type MarkJobFailedParams struct {
-	ID     pgtype.UUID `json:"id"`
-	Status string      `json:"status"`
+	ID        pgtype.UUID `json:"id"`
+	Status    string      `json:"status"`
+	LastError pgtype.Text `json:"last_error"`
 }
 
 func (q *Queries) MarkJobFailed(ctx context.Context, arg MarkJobFailedParams) error {
-	_, err := q.db.Exec(ctx, markJobFailed, arg.ID, arg.Status)
+	_, err := q.db.Exec(ctx, markJobFailed, arg.ID, arg.Status, arg.LastError)
 	return err
 }
 
 const markJobRunning = `-- name: MarkJobRunning :one
 UPDATE jobs set status = 'Running',
+    attempts = attempts+1,
     started_at = NOW(),
     updated_at = NOW()
-where id = $1 and status in ('Pending' , 'Failed') returning id, type, payload, status, idempotency_key, scheduled_at, started_at, completed_at, created_at, updated_at
+where id = $1 and status in ('Pending' , 'Failed') returning id, type, payload, status, idempotency_key, attempts, last_error, max_retries, scheduled_at, started_at, completed_at, created_at, updated_at
 `
 
 func (q *Queries) MarkJobRunning(ctx context.Context, id pgtype.UUID) (Job, error) {
@@ -133,6 +148,9 @@ func (q *Queries) MarkJobRunning(ctx context.Context, id pgtype.UUID) (Job, erro
 		&i.Payload,
 		&i.Status,
 		&i.IdempotencyKey,
+		&i.Attempts,
+		&i.LastError,
+		&i.MaxRetries,
 		&i.ScheduledAt,
 		&i.StartedAt,
 		&i.CompletedAt,
