@@ -9,6 +9,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+var ErrQueueEmpty = errors.New("queue is empty")
+
 const DefaultQueue = "queue:default" // this is key for the redis
 
 type Client struct {
@@ -36,7 +38,7 @@ func (c *Client) Dequeue(ctx context.Context, timeout time.Duration) (string, er
 	results, err := c.rdb.BRPop(ctx, timeout, DefaultQueue).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
-			return "", errors.New("queue is empty")
+			return "", ErrQueueEmpty
 		}
 		return "", fmt.Errorf("failed to dequeue job %w", err)
 	}
