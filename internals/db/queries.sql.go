@@ -51,6 +51,36 @@ func (q *Queries) CreateJobs(ctx context.Context, arg CreateJobsParams) (Job, er
 	return i, err
 }
 
+const getJobCountByStatus = `-- name: GetJobCountByStatus :many
+SELECT status , count(*)::BIGINT as count
+from jobs group by status
+`
+
+type GetJobCountByStatusRow struct {
+	Status string `json:"status"`
+	Count  int64  `json:"count"`
+}
+
+func (q *Queries) GetJobCountByStatus(ctx context.Context) ([]GetJobCountByStatusRow, error) {
+	rows, err := q.db.Query(ctx, getJobCountByStatus)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetJobCountByStatusRow{}
+	for rows.Next() {
+		var i GetJobCountByStatusRow
+		if err := rows.Scan(&i.Status, &i.Count); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getJobsByID = `-- name: GetJobsByID :one
 SELECT id, type, payload, status, idempotency_key, attempts, last_error, max_retries, scheduled_at, started_at, completed_at, created_at, updated_at from jobs where id = $1 limit 1
 `
@@ -101,6 +131,53 @@ func (q *Queries) GetJobsByIdempotencyKey(ctx context.Context, idempotencyKey pg
 	return i, err
 }
 
+const listJobs = `-- name: ListJobs :many
+SELECT id, type, payload, status, idempotency_key, attempts, last_error, max_retries, scheduled_at, started_at, completed_at, created_at, updated_at FROM jobs
+WHERE ($1::text = '' OR status = $1)
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListJobsParams struct {
+	Column1 string `json:"column_1"`
+	Limit   int32  `json:"limit"`
+	Offset  int32  `json:"offset"`
+}
+
+func (q *Queries) ListJobs(ctx context.Context, arg ListJobsParams) ([]Job, error) {
+	rows, err := q.db.Query(ctx, listJobs, arg.Column1, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Job{}
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.Type,
+			&i.Payload,
+			&i.Status,
+			&i.IdempotencyKey,
+			&i.Attempts,
+			&i.LastError,
+			&i.MaxRetries,
+			&i.ScheduledAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markJobCompleted = `-- name: MarkJobCompleted :exec
 UPDATE jobs set status = 'Completed',
     completed_at = NOW(),
@@ -141,6 +218,83 @@ where id = $1 and status in ('Pending' , 'Failed') returning id, type, payload, 
 
 func (q *Queries) MarkJobRunning(ctx context.Context, id pgtype.UUID) (Job, error) {
 	row := q.db.QueryRow(ctx, markJobRunning, id)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Type,
+		&i.Payload,
+		&i.Status,
+		&i.IdempotencyKey,
+		&i.Attempts,
+		&i.LastError,
+		&i.MaxRetries,
+		&i.ScheduledAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const recoverStuckJob = `-- name: RecoverStuckJob :many
+UPDATE jobs 
+set 
+    status = case when attempts >= max_retries then 'Dead'
+    else 'Failed'
+    end ,
+    last_error = 'worker crashed or timed out (recovered by sweeper)',
+    updated_at = NOW()
+where status = 'Running'
+and updated_at < $1
+returning id, type, payload, status, idempotency_key, attempts, last_error, max_retries, scheduled_at, started_at, completed_at, created_at, updated_at
+`
+
+func (q *Queries) RecoverStuckJob(ctx context.Context, updatedAt pgtype.Timestamptz) ([]Job, error) {
+	rows, err := q.db.Query(ctx, recoverStuckJob, updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Job{}
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.Type,
+			&i.Payload,
+			&i.Status,
+			&i.IdempotencyKey,
+			&i.Attempts,
+			&i.LastError,
+			&i.MaxRetries,
+			&i.ScheduledAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const replayDeadJobs = `-- name: ReplayDeadJobs :one
+UPDATE jobs
+set status = 'Pending',
+    attempts = 1,
+    last_error = NULL,
+    updated_at = NOW()
+where id = $1 and status = 'Dead' returning id, type, payload, status, idempotency_key, attempts, last_error, max_retries, scheduled_at, started_at, completed_at, created_at, updated_at
+`
+
+func (q *Queries) ReplayDeadJobs(ctx context.Context, id pgtype.UUID) (Job, error) {
+	row := q.db.QueryRow(ctx, replayDeadJobs, id)
 	var i Job
 	err := row.Scan(
 		&i.ID,

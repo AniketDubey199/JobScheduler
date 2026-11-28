@@ -19,6 +19,11 @@ const (
 )
 
 // this is key for the redis
+type QueueStats struct {
+	Default int64 `json:"default"`
+	Retry   int64 `json:"retry"`
+	DLQ     int64 `json:"dlq"`
+}
 
 type Client struct {
 	rdb *redis.Client
@@ -64,9 +69,33 @@ func (c *Client) ScheduledRetry(ctx context.Context, jobID string, delay time.Du
 	return nil
 }
 
+func (c *Client) GetQueueStats(ctx context.Context) (QueueStats, error) {
+	pipe := c.rdb.Pipeline()
+	defaultlen := pipe.LLen(ctx, DefaultQueue)
+	retrylen := pipe.ZCard(ctx, RetryQueue)
+	dlqlen := pipe.LLen(ctx, DLQQueue)
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		return QueueStats{}, fmt.Errorf("failed to fetch queue stats: %w", err)
+	}
+
+	return QueueStats{
+		Default: defaultlen.Val(),
+		Retry:   retrylen.Val(),
+		DLQ:     dlqlen.Val(),
+	}, nil
+}
+
 func (c *Client) MovetoDQL(ctx context.Context, jobID string) error {
 	if err := c.rdb.LPush(ctx, DLQQueue, jobID).Err(); err != nil {
 		return fmt.Errorf("failed to move job %s to DLQ: %w", jobID, err)
+	}
+	return nil
+}
+
+func (c *Client) RemovefromDQL(ctx context.Context, jobID string) error {
+	if err := c.rdb.LRem(ctx, DLQQueue, 0, jobID).Err(); err != nil {
+		return fmt.Errorf("failed to remove job %s from DLQ: %w", jobID, err)
 	}
 	return nil
 }

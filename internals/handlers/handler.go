@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/AniketDubey199/internals/db"
@@ -87,7 +88,7 @@ func (jb *JobHandler) GetJobByID(c fiber.Ctx) error {
 	var id pgtype.UUID
 	if err := id.Scan(c.Params("id")); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "cannot get the id",
+			"error": "cannot get the id (get jobs by ID)",
 		})
 	}
 	jobs, err := jb.queries.GetJobsByID(c, id)
@@ -98,4 +99,90 @@ func (jb *JobHandler) GetJobByID(c fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusOK).JSON(jobs)
+}
+
+func (jb *JobHandler) RetryJob(c fiber.Ctx) error {
+	idparams := c.Params("id")
+
+	var id pgtype.UUID
+	if err := id.Scan(idparams); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "invalid job UUID",
+		})
+	}
+	job, err := jb.queries.ReplayDeadJobs(c, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error": "job not found or not in DEAD status",
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to reset job for retry",
+		})
+	}
+	jobIDString := job.ID.String()
+	_ = jb.clients.RemovefromDQL(c, jobIDString)
+
+	if err := jb.clients.Enqueue(c, jobIDString); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "job reset in DB, but failed to enqueue in Redis",
+		})
+	}
+	return c.Status(fiber.StatusOK).JSON(job)
+
+}
+
+func (jb *JobHandler) ListAllJobs(c fiber.Ctx) error {
+	status := c.Query("status", "")
+
+	limit, err := strconv.Atoi(c.Query("limit", "20"))
+	if err != nil || limit > 100 || limit <= 0 {
+		limit = 20
+	}
+
+	offset, err := strconv.Atoi(c.Query("offset", "0"))
+	if err != nil || offset < 0 {
+		offset = 0
+	}
+
+	jobs, err := jb.queries.ListJobs(c.Context(), db.ListJobsParams{
+		Column1: status,
+		Limit:   int32(limit),
+		Offset:  int32(offset),
+	})
+
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to list jobs",
+		})
+	}
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"jobs":   jobs,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+func (jb *JobHandler) GetStats(c fiber.Ctx) error {
+	redisStats, err := jb.clients.GetQueueStats(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to fetch Redis queue stats",
+		})
+	}
+	rows, err := jb.queries.GetJobCountByStatus(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to fetch DB job counts",
+		})
+	}
+	dbCounts := make(map[string]int64, len(rows))
+	for _, r := range rows {
+		dbCounts[r.Status] = r.Count
+	}
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"queues": redisStats,
+		"jobs":   dbCounts,
+	})
 }

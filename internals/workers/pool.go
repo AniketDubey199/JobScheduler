@@ -37,6 +37,8 @@ func (p *Pool) Start(ctx context.Context) {
 	}
 	p.wg.Add(1)
 	go p.retrySchedulerJob(ctx)
+	p.wg.Add(1)
+	go p.runStuckJobSweeper(ctx)
 	p.wg.Wait()
 	log.Println("All workers stopped cleanly.")
 }
@@ -149,6 +151,49 @@ func (p *Pool) handlejobFailure(workerID int, job db.Job, execErr error) {
 
 	if err := p.clients.ScheduledRetry(context.Background(), jobIDStr, delay); err != nil {
 		log.Printf("[Worker %d] Failed to schedule retry for job %s: %v", workerID, jobIDStr, err)
+	}
+}
+
+func (p *Pool) runStuckJobSweeper(ctx context.Context) {
+	defer p.wg.Done()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	log.Println("[Sweeper] Stuck-job recovery sweeper started")
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[Sweeper] Shutting down...")
+			return
+		case <-ticker.C:
+			cutoff := pgtype.Timestamptz{
+				Time:  time.Now().Add(-2 * time.Minute),
+				Valid: true,
+			}
+			stuckjobs, err := p.queries.RecoverStuckJob(ctx, cutoff)
+			if err != nil {
+				if !errors.Is(err, context.Canceled) {
+					log.Printf("[Sweeper] Error recovering stuck jobs: %v", err)
+				}
+				continue
+			}
+			for _, job := range stuckjobs {
+				jobIDStr := job.ID.String()
+				if job.Status == "Dead" {
+					if err := p.clients.MovetoDQL(ctx, jobIDStr); err != nil {
+						log.Printf("[Sweeper] Failed to push stuck job %s to DLQ: %v", jobIDStr, err)
+						continue
+					}
+					log.Printf("[Sweeper] Stuck job %s exhausted retries -> moved to DLQ", jobIDStr)
+				} else {
+					if err := p.clients.Enqueue(ctx, jobIDStr); err != nil {
+						log.Printf("[Sweeper] Failed to re-enqueue stuck job %s: %v", jobIDStr, err)
+						continue
+					}
+					log.Printf("[Sweeper] Recovered stuck job %s -> re-enqueued", jobIDStr)
+				}
+			}
+		}
 	}
 }
 
